@@ -123,29 +123,40 @@ local function read_pid(path)
 	return last_number
 end
 
-local function kill(path)
+local function kill(path, mount_point)
 	local pid = read_pid(path)
 	if pid then
-		local status, _ = Command('kill'):arg({
+		local _, _ = Command('kill'):arg({
 			tostring(pid),
 		}):status()
 
-		if status and status.success then
-			local _, _ = fs.remove('file', Url(path))
+		ya.sleep(1)
 
-			return 0
-		else
+		local still_mounted = os.execute(string.format('mount | grep -q ".* on %s type .*"', mount_point))
+
+		if still_mounted then
 			ya.notify({
-				title = 'cryptomator-cli Error',
-				content = string.format('Failed to unmount %s\nCheck if files are in use', path.current_dir),
-				timeout = 10,
+				title = 'cryptomator-cli error',
+				content = 'umount vault failed, try to later',
+				timeout = 5,
 				level = 'error',
 			})
-			return 1
-		end
-	end
 
-	return 2
+			return false
+		end
+
+		local _, _ = fs.remove('file', Url(path))
+		local _, _ = fs.remove('dir', Url(mount_point))
+	else
+		ya.notify({
+			title = 'cryptomator-cli error',
+			content = 'pid file not found',
+			timeout = 10,
+			level = 'error',
+		})
+		return false
+	end
+	return true
 end
 
 return {
@@ -159,58 +170,45 @@ return {
 
 		if is_umount then
 			local path = get_working_and_preview_paths()
-			local pid_path = '/tmp/' .. tostring(path.current_dir.name) .. '.pid'
 
-			local kill_success = kill(pid_path)
-			if kill_success == 0 then
+			local umount_success = false
+
+			local current_dir_mounted =
+				os.execute(string.format('mount | grep -q ".* on %s type .*"', tostring(path.current_dir)))
+
+			if current_dir_mounted then
+				local tmp_file = string.format('/tmp/%s.pid', path.current_dir.name)
 				ya.emit('cd', { '..' })
 				ya.sleep(0.5)
+				umount_success = kill(tmp_file, path.current_dir)
+			else
+				local preview_dir_mounted = path.current_preview_dir
+					and os.execute(
+						string.format('mount | grep -q ".* on %s type .*"', tostring(path.current_preview_dir))
+					)
 
-				local _, _ = fs.remove('dir', path.current_dir)
-
-				ya.notify({
-					title = 'cryptomator-cli',
-					content = string.format('Unmounted vault successfully: %s', path.current_dir.name),
-					timeout = 10,
-					level = 'info',
-				})
-
-				return
-			elseif kill_success == 1 then
-				return
-			end
-
-			if path.current_preview_dir then
-				pid_path = '/tmp/' .. tostring(path.current_preview_dir.name) .. '.pid'
-
-				kill_success = kill(pid_path)
-
-				if kill_success == 0 then
-					ya.sleep(0.5)
-
-					local _, _ = fs.remove('dir', path.current_preview_dir)
-
+				if preview_dir_mounted then
+					local tmp_file = string.format('/tmp/%s.pid', path.current_preview_dir.name)
+					umount_success = kill(tmp_file, path.current_preview_dir)
+				else
 					ya.notify({
 						title = 'cryptomator-cli',
-						content = string.format('Unmounted vault successfully: %s', path.current_dir.name),
+						content = 'Neither the current directory nor the preview directory is a mount point.',
 						timeout = 10,
-						level = 'info',
+						level = 'warn',
 					})
-
-					return
-				elseif kill_success == 1 then
 					return
 				end
 			end
 
-			ya.notify({
-				title = 'Unmount Failed',
-				content = 'Not a cryptomator vault?\n' .. 'No PID file found for this directory',
-				timeout = 10,
-				level = 'warn',
-			})
-
-			return
+			if umount_success then
+				ya.notify({
+					title = 'cryptomator-cli',
+					content = 'umount vault successfully',
+					timeout = 10,
+					level = 'info',
+				})
+			end
 		else
 			local config = get_config()
 
@@ -308,9 +306,9 @@ return {
 
 			ya.sleep(1)
 
-			local status, _ = Command('ps'):arg({ '-p', pid }):status()
+			local success = os.execute(string.format('mount | grep -q ".* on %s type .*"', mount_point))
 
-			if status and status.code == 0 then
+			if success then
 				ya.notify({
 					title = 'cryptomator-cli',
 					content = string.format('Mounted %s to %s successfully', vault_path.name, mount_point),
